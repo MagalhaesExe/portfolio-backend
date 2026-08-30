@@ -1,6 +1,8 @@
 import express from 'express'
 import cors from 'cors'
+import swaggerUi from 'swagger-ui-express'
 import { env } from './config/env.js'
+import swaggerSpec from './swagger.js'
 import contactRoutes from './routes/contact.js'
 import { errorHandler } from './middleware/errorHandler.js'
 
@@ -17,6 +19,9 @@ app.use(cors({
 app.get('/health', (req, res) => {
   res.json({ status: 'OK' })
 })
+
+// Swagger
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec))
 
 // Rotas
 app.use('/api/contact', contactRoutes)

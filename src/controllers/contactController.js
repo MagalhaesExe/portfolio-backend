@@ -1,5 +1,6 @@
 import { query } from '../db/connection.js'
 import { validateContact } from '../validators/contact.js'
+import { sendConfirmationEmail, sendNotificationEmail } from '../services/emailService.js'
 
 export const createContact = async (req, res, next) => {
   try {
@@ -19,10 +20,17 @@ export const createContact = async (req, res, next) => {
       [value.name, value.email, value.message]
     )
 
+    const contact = result.rows[0]
+
+    Promise.all([
+      sendConfirmationEmail(contact.email, contact.name),
+      sendNotificationEmail(contact)
+    ]).catch((err) => console.error('[EMAIL ERROR]', err))
+
     res.status(201).json({
       success: true,
       message: 'Mensagem recebida com sucesso',
-      data: result.rows[0]
+      data: contact
     })
   } catch (error) {
     next(error)
