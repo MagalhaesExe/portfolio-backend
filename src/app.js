@@ -1,6 +1,8 @@
 import express from 'express'
 import cors from 'cors'
 import { env } from './config/env.js'
+import contactRoutes from './routes/contact.js'
+import { errorHandler } from './middleware/errorHandler.js'
 
 const app = express()
 
@@ -16,9 +18,15 @@ app.get('/health', (req, res) => {
   res.json({ status: 'OK' })
 })
 
+// Rotas
+app.use('/api/contact', contactRoutes)
+
 // 404
 app.use((req, res) => {
   res.status(404).json({ success: false, message: 'Rota não encontrada' })
 })
+
+// Error Handler (DEVE SER O ÚLTIMO)
+app.use(errorHandler)
 
 export default app
