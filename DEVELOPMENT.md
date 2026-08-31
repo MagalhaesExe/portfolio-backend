@@ -3,7 +3,7 @@
 ## Contexto do Projeto
 
 **Desenvolvedor**: Alex Magalhães da Silva Junior
-**Objetivo**: API REST robusta para suportar Portfolio Full-Stack
+**Objetivo**: API REST para suportar o formulário de contato e a documentação do Portfolio Full-Stack
 **Stack**: Node.js + Express.js + PostgreSQL + Swagger/OpenAPI
 
 ## Arquitetura do Projeto
@@ -14,28 +14,31 @@ portfolio-backend/
 │   ├── controllers/
 │   │   └── contactController.js      (Lógica de contato)
 │   ├── routes/
-│   │   ├── index.js                  (Aggregador de rotas)
-│   │   └── contact.js                (Rota POST /contact)
+│   │   └── contact.js                (Rota POST /api/contact)
 │   ├── middleware/
 │   │   ├── errorHandler.js           (Tratamento centralizado de erros)
-│   │   └── auth.js                   (Autenticação JWT para admin - futuro)
+│   │   └── rateLimit.js              (Rate limiting global e de contato)
 │   ├── db/
 │   │   ├── connection.js             (Pool PostgreSQL)
-│   │   ├── init.sql                  (Schema do BD)
-│   │   └── queries.js                (Funções de query)
+│   │   └── init.sql                  (Schema do BD)
+│   ├── services/
+│   │   └── emailService.js           (Envio de email via Resend)
 │   ├── validators/
 │   │   └── contact.js                (Schemas Joi para validação)
 │   ├── config/
-│   │   └── env.js                    (Variáveis de ambiente)
+│   │   ├── env.js                    (Variáveis de ambiente)
+│   │   └── logger.js                 (Logger Winston)
 │   ├── app.js                        (Setup Express)
-│   └── server.js                     (Inicializar servidor)
+│   ├── server.js                     (Inicializar servidor)
+│   └── swagger.js                    (Config Swagger/OpenAPI)
 ├── .env.example
 ├── .gitignore
 ├── package.json
+├── README.md
 └── DEVELOPMENT.md (este arquivo)
 ```
 
-## Funcionalidades Obrigatórias
+## Funcionalidades
 
 ### 1. Endpoint de Contato
 
@@ -44,9 +47,9 @@ portfolio-backend/
 Request body:
 ```json
 {
-  "name": "string (max 100)",
-  "email": "string (valid email)",
-  "message": "string (max 1000)"
+  "name": "string (3-100 caracteres)",
+  "email": "string (email válido)",
+  "message": "string (10-1000 caracteres)"
 }
 ```
 
@@ -65,11 +68,6 @@ Response (201 Created):
 }
 ```
 
-Validações:
-- Name: obrigatório, string, máx 100 caracteres
-- Email: obrigatório, email válido
-- Message: obrigatório, string, máx 1000 caracteres
-
 Erros (422 Unprocessable Entity):
 ```json
 {
@@ -80,33 +78,31 @@ Erros (422 Unprocessable Entity):
 }
 ```
 
-### 2. Envio de Email (Nodemailer)
+Rate limit dedicado: 5 requisições/hora por IP (`middleware/rateLimit.js`).
 
-Quando formulário é submetido:
-- Enviar email de confirmação ao usuário
-- Enviar notificação ao desenvolvedor (alex@email.com)
-- Log de sucesso/falha
+### 2. Envio de Email (Resend)
 
-Credenciais no `.env`:
-```
-EMAIL_USER=seu_email@gmail.com
-EMAIL_PASS=sua_senha_app (Google App Password)
-```
+Ao salvar um contato no banco, dispara em paralelo (`Promise.allSettled`, sem bloquear a resposta):
+- Email de confirmação para quem enviou a mensagem
+- Email de notificação para o dono do site (`EMAIL_USER`)
+
+Usamos a API do [Resend](https://resend.com) em vez de SMTP (Nodemailer) porque hosts free (como o Render) costumam bloquear conexões SMTP de saída (portas 465/587); a API do Resend funciona via HTTPS.
+
+Sem verificar um domínio próprio no Resend, o remetente padrão (`onboarding@resend.dev`) só entrega para o email cadastrado na conta — ou seja, hoje só o email de notificação funciona de fato em produção; o de confirmação ao visitante depende de verificar um domínio.
 
 ### 3. Documentação Swagger/OpenAPI
 
-- Auto-gerada em `/api-docs`
-- Documentar todos os endpoints
-- Exemplos de request/response
-- Schemas de erro
+- Auto-gerada em `/api-docs` a partir dos comentários JSDoc em `routes/*.js`
+- `SWAGGER_URL` define a URL do servidor exibida no Swagger UI
 
 ## Banco de Dados - PostgreSQL
 
-### Schema Inicial
+### Schema (`src/db/init.sql`)
 
 ```sql
--- Tabela de contatos
-CREATE TABLE contacts (
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+CREATE TABLE IF NOT EXISTS contacts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name VARCHAR(100) NOT NULL,
   email VARCHAR(255) NOT NULL,
@@ -116,285 +112,53 @@ CREATE TABLE contacts (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Índices para performance
-CREATE INDEX idx_contacts_email ON contacts(email);
-CREATE INDEX idx_contacts_created_at ON contacts(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email);
+CREATE INDEX IF NOT EXISTS idx_contacts_created_at ON contacts(created_at DESC);
 ```
 
-### Conexão com Pool
+Rodar manualmente contra um banco novo:
+```bash
+psql "$DATABASE_URL" -f src/db/init.sql
+```
+
+### Conexão com Pool (`src/db/connection.js`)
 
 ```javascript
-// db/connection.js
 import pg from 'pg'
+import { env } from '../config/env.js'
+
 const { Pool } = pg
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: env.DATABASE_URL
 })
 
 export const query = (text, params) => pool.query(text, params)
 export const getClient = () => pool.connect()
 ```
 
-## Padrões de Código
-
-### Estrutura de Controller
-
-```javascript
-// controllers/contactController.js
-import { query } from '../db/connection.js'
-import { sendEmail } from '../services/email.js'
-import { validateContact } from '../validators/contact.js'
-
-export const createContact = async (req, res, next) => {
-  try {
-    // 1. Validar entrada
-    const { error, value } = validateContact(req.body)
-    if (error) {
-      return res.status(422).json({
-        success: false,
-        errors: error.details.reduce((acc, e) => {
-          acc[e.path[0]] = e.message
-          return acc
-        }, {})
-      })
-    }
-
-    // 2. Salvar no BD
-    const result = await query(
-      'INSERT INTO contacts (name, email, message) VALUES ($1, $2, $3) RETURNING *',
-      [value.name, value.email, value.message]
-    )
-
-    const contact = result.rows[0]
-
-    // 3. Enviar email
-    await sendEmail({
-      to: value.email,
-      template: 'confirmation',
-      data: { name: value.name }
-    })
-
-    // 4. Responder
-    res.status(201).json({
-      success: true,
-      message: 'Mensagem recebida com sucesso',
-      data: contact
-    })
-  } catch (error) {
-    next(error) // Passar pro middleware de erro
-  }
-}
-```
-
-### Rotas com Express
-
-```javascript
-// routes/contact.js
-import express from 'express'
-import { createContact } from '../controllers/contactController.js'
-
-const router = express.Router()
-
-/**
- * @route   POST /api/contact
- * @desc    Enviar mensagem de contato
- * @access  Public
- */
-router.post('/', createContact)
-
-export default router
-```
-
-### Validação com Joi
-
-```javascript
-// validators/contact.js
-import Joi from 'joi'
-
-const contactSchema = Joi.object({
-  name: Joi.string()
-    .max(100)
-    .required()
-    .messages({
-      'string.max': 'Nome não pode exceder 100 caracteres',
-      'any.required': 'Nome é obrigatório'
-    }),
-  email: Joi.string()
-    .email()
-    .required()
-    .messages({
-      'string.email': 'Email inválido',
-      'any.required': 'Email é obrigatório'
-    }),
-  message: Joi.string()
-    .max(1000)
-    .required()
-    .messages({
-      'string.max': 'Mensagem não pode exceder 1000 caracteres',
-      'any.required': 'Mensagem é obrigatória'
-    })
-})
-
-export const validateContact = (data) => contactSchema.validate(data, { abortEarly: false })
-```
-
-### Middleware de Erro Centralizado
-
-```javascript
-// middleware/errorHandler.js
-export const errorHandler = (err, req, res, next) => {
-  console.error('[ERROR]', err)
-
-  const statusCode = err.statusCode || 500
-  const message = err.message || 'Erro interno do servidor'
-
-  res.status(statusCode).json({
-    success: false,
-    message,
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
-  })
-}
-```
-
-### Configuração Express (app.js)
-
-```javascript
-// app.js
-import express from 'express'
-import cors from 'cors'
-import swaggerUi from 'swagger-ui-express'
-import swaggerSpec from './swagger.js'
-import contactRoutes from './routes/contact.js'
-import { errorHandler } from './middleware/errorHandler.js'
-
-const app = express()
-
-// Middleware
-app.use(express.json())
-app.use(cors({
-  origin: process.env.CORS_ORIGIN,
-  credentials: true
-}))
-
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'OK' })
-})
-
-// Swagger
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec))
-
-// Rotas
-app.use('/api/contact', contactRoutes)
-
-// 404
-app.use((req, res) => {
-  res.status(404).json({ success: false, message: 'Rota não encontrada' })
-})
-
-// Error Handler (DEVE SER O ÚLTIMO)
-app.use(errorHandler)
-
-export default app
-```
-
-## Configuração do Swagger/OpenAPI
-
-Criar `src/swagger.js`:
-
-```javascript
-import swaggerJsdoc from 'swagger-jsdoc'
-
-const options = {
-  definition: {
-    openapi: '3.0.0',
-    info: {
-      title: 'Portfolio API',
-      version: '1.0.0',
-      description: 'API do portfólio de Alex Magalhães'
-    },
-    servers: [
-      {
-        url: process.env.SWAGGER_URL || 'http://localhost:3000',
-        description: 'Development server'
-      }
-    ]
-  },
-  apis: ['./src/routes/*.js'] // Ler comentários JSDoc das rotas
-}
-
-export default swaggerJsdoc(options)
-```
-
-Depois adicionar comentários nas rotas:
-
-```javascript
-/**
- * @swagger
- * /api/contact:
- *   post:
- *     summary: Enviar mensagem de contato
- *     tags: [Contact]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               name:
- *                 type: string
- *               email:
- *                 type: string
- *               message:
- *                 type: string
- *     responses:
- *       201:
- *         description: Mensagem enviada com sucesso
- *       422:
- *         description: Validação falhou
- */
-```
-
 ## Variáveis de Ambiente
 
-`.env.example`:
-```
-NODE_ENV=development
-PORT=3000
+Ver `.env.example` na raiz do projeto para a lista completa e comentada. Resumo:
 
-# Database
-DATABASE_URL=postgresql://user:password@localhost:5432/portfolio_db
-
-# Email
-EMAIL_USER=alexmagalhaesjr15@gmail.com
-EMAIL_PASS=Jr15130816*
-
-# JWT
-JWT_SECRET=sua_chave_super_segura_min_32_chars
-
-# CORS
-CORS_ORIGIN=http://localhost:5173
-
-# Swagger
-SWAGGER_URL=http://localhost:3000
-```
+| Variável | Descrição |
+|---|---|
+| `NODE_ENV` / `PORT` | ambiente e porta do servidor |
+| `DATABASE_URL` | connection string do PostgreSQL |
+| `EMAIL_USER` | email que recebe as notificações de contato |
+| `RESEND_API_KEY` | API key do Resend, usada para enviar os emails |
+| `CORS_ORIGIN` | URL do frontend autorizada pelo CORS |
+| `SWAGGER_URL` | URL pública usada como servidor no Swagger |
+| `LOG_LEVEL` | nível de log do Winston |
 
 ## Setup Local - Passo a Passo
 
 ### 1. PostgreSQL
 
+Suba um Postgres local (Docker, instalação nativa, etc.) e crie o schema:
+
 ```bash
-# macOS com Homebrew
-brew install postgresql
-brew services start postgresql
-
-# Criar banco
-createdb portfolio_db
-
-# Conectar e executar schema
-psql portfolio_db < src/db/init.sql
+psql "$DATABASE_URL" -f src/db/init.sql
 ```
 
 ### 2. Arquivo .env
@@ -404,88 +168,39 @@ cp .env.example .env
 # Editar com valores reais
 ```
 
-### 3. Instalar dependências
+### 3. Instalar dependências e rodar
 
 ```bash
 npm install
-```
-
-### 4. Rodar em desenvolvimento
-
-```bash
 npm run dev
 ```
 
 API disponível em `http://localhost:3000`
 Swagger em `http://localhost:3000/api-docs`
 
-## Ordem de Desenvolvimento Recomendada
-
-1. **Setup inicial** (FEITO ✅)
-   - Estrutura de pastas
-   - Dependências instaladas
-   - `.env` configurado
-
-2. **Configuração Express** (PRÓXIMO)
-   - `app.js` com middleware
-   - `server.js` para iniciar
-   - CORS configurado
-
-3. **Banco de Dados**
-   - `db/connection.js` (Pool PostgreSQL)
-   - `db/init.sql` (Schema)
-   - Testar conexão
-
-4. **Endpoint de Contato**
-   - Validação (Joi)
-   - Controller
-   - Rota
-   - Testar com Insomnia/Postman
-
-5. **Swagger/OpenAPI**
-   - Configurar `swagger.js`
-   - Documentar endpoints
-   - Acessar `/api-docs`
-
-6. **Envio de Email**
-   - Configurar Nodemailer
-   - Criar templates de email
-   - Testar envio
-
-7. **Tratamento de Erros**
-   - Middleware centralizado
-   - Status codes apropriados
-   - Logs estruturados
-
-8. **Deploy**
-   - Preparar para Render/Railway
-   - Variáveis de ambiente em produção
-   - Testar pipeline CI/CD
-
 ## Convenções de Nomenclatura
 
 - **Controllers**: `nomeController.js` (contactController.js)
 - **Rotas**: `nome.js` (contact.js)
-- **Funções**: camelCase (createContact, sendEmail)
+- **Funções**: camelCase (createContact, sendConfirmationEmail)
 - **Constantes**: UPPER_SNAKE_CASE (PORT, DATABASE_URL)
 - **Variáveis**: camelCase (userData, errorMessage)
 
-## Deploy - Render/Railway
+## Deploy
 
-- **Platform**: Render ou Railway
-- **Branch**: `main`
-- **Build command**: `npm install`
-- **Start command**: `npm start`
-- **Environment variables**: Configurar no painel (DATABASE_URL, etc)
+- **Backend**: Web Service + PostgreSQL no Render (planos Free), auto-deploy a cada push em `main`
+- **Frontend**: Vercel
+- **Email**: Resend (ver seção acima)
+
+Pendências conhecidas do plano Free:
+- O banco Postgres free do Render expira após 30 dias (precisa upgrade pra plano pago se for usar permanentemente)
+- O Web Service free "dorme" após ~15 min de inatividade (cold start de 30-50s na próxima requisição)
+- Email de confirmação ao visitante requer verificar um domínio próprio no Resend
 
 ## Recursos Úteis
 
 - [Express Docs](https://expressjs.com/)
 - [PostgreSQL Docs](https://www.postgresql.org/docs/)
 - [Swagger/OpenAPI](https://swagger.io/)
-- [Nodemailer](https://nodemailer.com/)
+- [Resend Docs](https://resend.com/docs)
 - [Joi Validation](https://joi.dev/)
-
----
-
-**Quando pronto, integrar com o Frontend e fazer testes end-to-end!** 🚀
