@@ -42,23 +42,31 @@ export const createContact = async (req, res, next) => {
       email: contact.email,
     })
 
-    Promise.all([
+    Promise.allSettled([
       sendConfirmationEmail(contact.email, contact.name),
       sendNotificationEmail(contact)
-    ])
-      .then(() => {
+    ]).then(([confirmation, notification]) => {
+      if (confirmation.status === 'rejected') {
+        logger.error('Erro ao enviar email de confirmação', {
+          requestId,
+          contactId: contact.id,
+          error: confirmation.reason?.message,
+        })
+      }
+      if (notification.status === 'rejected') {
+        logger.error('Erro ao enviar email de notificação', {
+          requestId,
+          contactId: contact.id,
+          error: notification.reason?.message,
+        })
+      }
+      if (confirmation.status === 'fulfilled' && notification.status === 'fulfilled') {
         logger.info('Emails enviados com sucesso', {
           requestId,
           contactId: contact.id,
         })
-      })
-      .catch((err) => {
-        logger.error('Erro ao enviar emails', {
-          requestId,
-          contactId: contact.id,
-          error: err.message,
-        })
-      })
+      }
+    })
 
     logger.info('Resposta 201 enviada', {
       requestId,

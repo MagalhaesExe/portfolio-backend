@@ -1,20 +1,14 @@
-import nodemailer from 'nodemailer'
+import { Resend } from 'resend'
 import { env } from '../config/env.js'
 
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 587,
-  secure: false,
-  requireTLS: true,
-  auth: {
-    user: env.EMAIL_USER,
-    pass: env.EMAIL_PASS
-  }
-})
+const resend = new Resend(env.RESEND_API_KEY)
+
+// Remetente padrão do Resend, válido sem verificar domínio próprio
+const FROM_ADDRESS = 'Portfolio Alex <onboarding@resend.dev>'
 
 export const sendConfirmationEmail = async (to, name) => {
-  const mailOptions = {
-    from: env.EMAIL_USER,
+  await resend.emails.send({
+    from: FROM_ADDRESS,
     to,
     subject: 'Mensagem recebida - Portfolio Alex',
     html: `
@@ -22,14 +16,12 @@ export const sendConfirmationEmail = async (to, name) => {
       <p>Recebemos sua mensagem e vamos responder em breve.</p>
       <p>Abraços,<br>Alex Magalhães</p>
     `
-  }
-
-  await transporter.sendMail(mailOptions)
+  })
 }
 
 export const sendNotificationEmail = async (contact) => {
-  const mailOptions = {
-    from: env.EMAIL_USER,
+  await resend.emails.send({
+    from: FROM_ADDRESS,
     to: env.EMAIL_USER,
     subject: `Novo contato - ${contact.name}`,
     html: `
@@ -39,7 +31,5 @@ export const sendNotificationEmail = async (contact) => {
       <p><strong>Mensagem:</strong></p>
       <p>${contact.message}</p>
     `
-  }
-
-  await transporter.sendMail(mailOptions)
+  })
 }
